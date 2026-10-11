@@ -1,1 +1,6 @@
 .idea/
+
+# Gradle specific ignores
+.gradle
+build
+.kotlin

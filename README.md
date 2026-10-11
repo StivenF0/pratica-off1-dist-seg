@@ -7,7 +7,9 @@
 
 ## Estrutura do repositório
 
-- **`mini_dns/`**: Mini-DNS para resolução de nomes (sockets UDP);
-- **`svc_discovery/`**: Descoberta de serviços (service discovery);
-- **_(A decidir)_**: Nomeação em P2P (overlay simplificado);
-- **_(A decidir)_**: CDN.
+- **`modules/mini-dns`**: Mini-DNS para resolução de nomes;
+- **`modules/service-discovery`**: Descoberta de serviços;
+- **`modules/(a-decidir)`**: Nomeação P2P em overlay simplificado;
+- **`modules/(a-decidir)`**: Simulação de uma CDN.
+
+Cada diretório em `modules/` corresponde a um subprojeto Gradle independente.
