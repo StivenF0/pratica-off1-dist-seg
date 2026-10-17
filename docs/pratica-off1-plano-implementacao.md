@@ -22,7 +22,7 @@ Esta versão foi salva em `/home/robert/.opencode/plan/pratica-off1-plano-integr
 | --- | --- | --- |
 | Integridade/autenticidade das mensagens | SEG exige HMAC, inclusive testes de HMAC corrompido e hash sem chave | Implementar **HMAC-SHA-256 com chave separada**; GCM e PSS não substituem esse requisito |
 | Troca de chaves | SEG pede handshake inicial e sessões AES/HMAC | RSA transporta as chaves no início da sessão; não executar RSA em cada mensagem de aplicação |
-| Identidade dos participantes | HMAC prova posse do segredo, não vincula sozinho uma chave a um nome | Preservar chaves públicas confiáveis e usar a assinatura PSS já implementada **no handshake**, não em cada mensagem |
+| Identidade dos participantes | HMAC prova posse do segredo, não vincula sozinho uma chave a um nome | Confiar em chaves públicas configuradas localmente; manter PSS no handshake e em cada frame conforme o diagrama do grupo |
 | Mini-DNS | SD pede mudanças em `servidor1`, `servidor4` e `servidor9`; SEG fixa `servidor1 → 192.168.0.111` | Demonstrar as três alterações e o valor exato de `servidor1` |
 | Notificações DNS | Caso de SEG é denominado broadcast/multicast | Demonstrar multicast UDP real; não chamar três unicasts de multicast |
 | Descoberta | SEG pede lista de servidores ativos cifrada e chamadas balanceadas | Devolver a lista completa ordenada por round robin; o cliente usa o primeiro endereço |
@@ -37,7 +37,7 @@ A proposta anterior de uma versão sem autenticação não é adotada. A versão
 
 ```text
 modules/
-  security/           chaves, handshake, AES/HMAC e transporte seguro
+  security/           chaves, handshake e proteção AES/HMAC/PSS de bytes
   mini-dns/           DNS UDP, registrador e três clientes
   service-discovery/  diretório, três calculadoras e três clientes
   p2p-naming/         seis nós TCP em anel
@@ -57,11 +57,11 @@ Estado observado:
 | Área | Já existe | Falta |
 | --- | --- | --- |
 | Build | Gradle 9.8.1, Java 21, JUnit, `check` ligado a `security` | Builds/dependências dos quatro projetos e habilitação de P2P/CDN |
-| Criptografia | RSA-3072/OAEP-SHA-256, AES-256-GCM e assinatura RSA-PSS por envelope | HMAC, duas chaves de sessão e handshake inicial |
-| Confiança | Pares RSA separados, arquivos PEM, manifestos e validação de fingerprints | Reutilizar no handshake, sem criar PKI ou nova infraestrutura |
-| Replay | Controle em memória, expiração atômica e quarentena inicial | Aplicar ao handshake e acrescentar sequência nas mensagens da sessão |
-| Transporte | Frames TCP limitados e datagramas de até 1200 bytes | Integrar sessões, HMAC e regras de descarte/fechamento |
-| Testes | Relatórios anteriores: 15 testes sem falhas, inclusive duas JVMs | Novos testes de HMAC/sessão e todos os cenários dos exercícios |
+| Criptografia | RSA-3072/OAEP-SHA-256, AES-256-GCM, HMAC-SHA-256 e RSA-PSS por sessão | Reutilizar o perfil fixo no handshake e nos frames |
+| Confiança | Pares RSA separados e arquivos PEM; sem manifesto | Carregar localmente chaves públicas de participantes configurados |
+| Replay | Nenhuma detecção; só contador de envio por direção/sessão | Limitação aceita: frame repetido pode repetir a operação; oferta antiga pode reinstalar chaves |
+| Transporte | Mini-DNS usa `DatagramSocket`/`MulticastSocket` diretamente | Cada projeto trata seus sockets e erros; `security` só protege bytes |
+| Testes | Testes pequenos de criptografia e integração do Mini-DNS | Demonstração manual entre processos; não manter teste genérico entre JVMs |
 | Domínio | Quatro diretórios com `.gitkeep` | Implementar os quatro exercícios |
 
 Os testes existentes não foram reexecutados durante este planejamento. O PDF de Segurança recém-adicionado e as alterações já presentes no repositório devem ser preservados.
@@ -76,7 +76,7 @@ Os testes existentes não foram reexecutados durante este planejamento. O PDF de
 | Chave de dados | AES de **256 bits**, nova por sessão |
 | Cifra dos dados | `AES/GCM/NoPadding`, tag de 128 bits, mantendo a implementação do JDK já utilizada |
 | Integridade exigida por SEG | `HmacSHA256`, chave aleatória de 256 bits **independente** da chave AES; MAC completo de 32 bytes |
-| Autenticidade de identidade | RSA-PSS/SHA-256 já existente na abertura da sessão; chave pública previamente fixada à identidade |
+| Autenticidade de identidade | RSA-PSS/SHA-256 no handshake e em cada frame; chave pública previamente configurada para a identidade |
 | Aleatoriedade | `SecureRandom`, `KeyGenerator` e `KeyPairGenerator` |
 
 OAEP já é um padding RSA. Não trocar para RSA sem padding ou PKCS#1 v1.5 apenas para reduzir linhas. Não trocar AES-GCM por ECB nem usar SHA-256 sem chave como substituto de HMAC.
@@ -85,9 +85,9 @@ GCM já oferece autenticação de dados, mas o **HMAC explícito é necessário 
 
 ### 4.2. Confiança e autenticidade
 
-- Reutilizar `LocalIdentity`, `KeyFiles`, `TrustStore` e a CLI existentes. Não refazer o formato do manifesto nesta etapa.
+- Reutilizar `LocalIdentity`, `KeyFiles`, `TrustedIdentity` e a geração de chaves. Não usar `TrustStore` ou manifesto; cada processo carrega as chaves públicas esperadas de arquivos locais.
 - Chaves públicas são provisionadas por arquivos locais confiáveis. Nenhum participante passa a ser confiável por enviar uma chave na rede.
-- Manter pares RSA separados para transporte e assinatura, porque já existem e têm finalidades distintas. PSS será usado no handshake; mensagens normais usarão AES/HMAC da sessão autenticada.
+- Manter pares RSA separados para transporte e assinatura. RSA-OAEP só transporta as chaves no handshake; cada frame usa AES-GCM, HMAC e assinatura RSA-PSS.
 - O iniciador é identificado pela assinatura da oferta de chaves; o destinatário esperado é identificado pela chave RSA pública fixada e pela confirmação válida com as chaves que apenas ele deveria conseguir recuperar.
 - HMAC autentica mensagens perante os dois participantes que compartilham o segredo. Não oferece assinatura pública, prova a terceiros ou não repúdio.
 - Cada aplicação autoriza operações pelo par autenticado: registrador atualiza DNS, calculadoras registram serviços e origem invalida caches. Um nome no payload ou o endereço IP, isoladamente, não é prova de identidade.
@@ -97,37 +97,32 @@ GCM já oferece autenticação de dados, mas o **HMAC explícito é necessário 
 
 O canal será híbrido pela combinação **RSA no estabelecimento** e **AES/HMAC nos dados**, como descrito nos casos de SEG. Não é necessário executar RSA em cada comando: as chaves AES/HMAC são transportadas cifradas no handshake. Somente metadados públicos de enquadramento/contexto ficam fora da cifra; nomes consultados, operações, arquivos, conteúdo e erros de domínio ficam cifrados.
 
-1. **Iniciador → receptor: `KEY_EXCHANGE`.** Gerar uma chave AES e uma chave HMAC, cada uma com 32 bytes. Cifrar os 64 bytes com RSA-OAEP do receptor. A oferta inclui projeto, identidades, identificador aleatório da sessão e validade curta, protegidos por PSS. Incluir HMAC da oferta usando a chave HMAC proposta; nenhum segredo vai em claro.
-2. **Receptor valida.** Conferir formato, identidade/assinatura, contexto e validade; recuperar as duas chaves; conferir HMAC. Registrar a oferta contra replay atomicamente, somente após a validação criptográfica. Não registrar serviço, atualizar nome ou consultar arquivo durante a negociação.
-3. **Receptor → iniciador: `READY`.** Responder com AES-GCM e HMAC da sessão, vinculando o mesmo identificador e as identidades. O iniciador só envia comandos depois de validar essa confirmação. O servidor só entrega dados ao domínio depois de concluir sua validação da oferta.
+1. **Iniciador → receptor: `KEY_EXCHANGE`.** Gerar uma chave AES e uma chave HMAC, cada uma com 32 bytes. Cifrar os 64 bytes com RSA-OAEP do receptor. A oferta inclui projeto, identidades e identificador aleatório da sessão, protegidos por PSS. Incluir HMAC da oferta usando a chave HMAC proposta; nenhum segredo vai em claro.
+2. **Receptor valida.** Conferir formato, identidade/assinatura e contexto; recuperar as duas chaves e conferir HMAC. Não há cache de replay nem validade da oferta. Não registrar serviço, atualizar nome ou consultar arquivo durante a negociação.
+3. **Receptor → iniciador: `READY`.** Responder com AES-GCM, HMAC e assinatura PSS da sessão, vinculando o mesmo identificador e as identidades. O iniciador só envia comandos depois de validar essa confirmação. O servidor só entrega dados ao domínio depois de concluir sua validação da oferta.
 4. **Falha.** Em TCP, fechar somente a conexão afetada. Em UDP, descartar a oferta/confirmação inválida; o iniciador termina por timeout. Não instalar sessão com chave parcial, assinatura inválida ou HMAC inválido.
 
 O RSA transporta somente material curto de chaves; 64 bytes cabem no OAEP escolhido. A assinatura cobre o cabeçalho canônico, o material RSA cifrado e o HMAC da oferta. A confirmação tem tipo/direção próprios para não aceitar reflexão de uma mensagem enviada pelo próprio cliente.
 
-Reutilizar o controle antirreplay atual **para ofertas de handshake**: prazo máximo de 30 s, tolerância de 2 s e quarentena inicial já implementada de 34 s. Esse mecanismo não é exigido nominalmente pelos PDFs, mas já existe e evita redesenhar a negociação para proteger reinícios. Esperar prontidão uma vez por processo, antes de gerar/oferecer chaves na demonstração; isso não limita a sessão a 30 s.
-
-Uma oferta UDP repetida não pode reinstalar chaves nem zerar contadores. Se a sessão ainda existe, reenviar os mesmos bytes da confirmação já produzida; se não existe, rejeitar e iniciar nova negociação com chaves novas. Limitar ofertas/sessões por participantes configurados e tempo de espera; não criar retries automáticos de comandos de domínio mutáveis.
+Não há `ReplayGuard`, cache, validade temporal ou quarentena. O cliente envia a oferta uma vez e aguarda `READY`; se UDP perder um pacote, a demonstração pode precisar ser reiniciada. Uma oferta antiga pode reinstalar as mesmas chaves e reiniciar o contador, com risco de reutilização do nonce GCM; evitar isso exigiria outro desenho de handshake e está fora do escopo desta simplificação.
 
 ### 4.4. Mensagens da sessão
 
 ```text
-cabeçalho: versão, tipo, sessionId, direção, sequência, comprimento
-corpo:     ciphertext AES-GCM com tag
-final:     HMAC-SHA-256(cabeçalho || ciphertext || tag)
+cabeçalho || ciphertext AES-GCM com tag || HMAC-SHA-256 || assinatura RSA-PSS
 ```
 
 - Uma sessão possui as duas chaves, as identidades verificadas e contadores por direção. Não criar um serviço ou repositório genérico de sessões.
 - Construir o IV GCM de 96 bits com um prefixo de direção de 32 bits e uma sequência crescente de 64 bits. Direções diferentes usam prefixos diferentes. Nunca repetir sequência com a mesma chave; esgotamento encerra a sessão e exige chaves novas.
 - Sincronizar geração de sequência/cifra por sessão; não compartilhar objetos mutáveis `Cipher` ou `Mac` entre threads.
 - Autenticar o cabeçalho como AAD do GCM e como parte do HMAC. Comparar MACs com `MessageDigest.isEqual` e só decifrar após HMAC válido.
-- Antes de entregar bytes, verificar tag GCM, sessão, direção e replay. Usar janela fixa pequena de sequências recebidas para aceitar reordenação UDP sem reaplicar pacotes; atualizar a janela atomicamente após validação.
-- Após reinício, descartar sessões AES/HMAC; nunca persistir essas chaves e reiniciar seus contadores. O handshake gera material novo e o guard de ofertas impede reinstalação de material antigo por replay dentro do modelo de relógio documentado.
+- Antes de entregar bytes, verificar HMAC, assinatura, tag GCM, sessão e direção. Não manter janela de recebimento; um frame autenticado repetido pode ser entregue novamente à aplicação.
+- Após reinício, descartar sessões AES/HMAC; nunca persistir essas chaves. A limitação de replay de ofertas está documentada acima.
 - Uma sessão TCP dura até o fechamento da conexão. Uma associação UDP dura durante a execução do cenário; reconexão não reutiliza contadores/chaves. Sem renovação automática, negociação de algoritmos ou rotação em segundo plano.
 
 ### 4.5. Transporte, erros e logs
 
-- TCP mantém prefixo de comprimento de quatro bytes, limite de 1 MiB, leitura completa, EOF e timeout de handshake/requisição. Conexões de registro/controle intencionalmente persistentes não expiram apenas porque ficaram ociosas.
-- UDP mantém limite de 1200 bytes no pacote completo e detecção de truncamento. Ofertas RSA/PSS e multicast agregado precisam passar por teste de tamanho real. Sem fragmentação de aplicação.
+- Os projetos implementam diretamente seus enquadramentos TCP e sockets UDP. Mini-DNS limita datagramas a 1200 bytes e detecta excesso; não há wrapper de transporte genérico em `security`.
 - HMAC inválido ou cifra inválida nunca alcança código de domínio. Não calcular, encaminhar busca, consultar origem nem alterar tabelas antes da validação.
 - UDP inválido: descartar e registrar falha, continuando o listener. TCP inválido: registrar e fechar aquela conexão, não o servidor. Na CDN, preservar integralmente o cache.
 - Entrada de domínio inválida em canal válido: devolver/imprimir **`Erro na entrada de dados. Tente outra vez!`**. Não responder a pacote não autenticado com detalhes de RSA, padding ou HMAC.
@@ -136,12 +131,12 @@ final:     HMAC-SHA-256(cabeçalho || ciphertext || tag)
 
 ### 4.6. Alcance da mudança em `security`
 
-1. Reutilizar geração/leitura de chaves, confiança local, OAEP, GCM, PSS e enquadramento existentes.
-2. Adaptar o envelope assinado para abertura de sessão, sem criar uma segunda implementação dos mesmos algoritmos.
-3. Acrescentar um objeto concreto de sessão para AES/HMAC, sequências e autenticação do par. Adaptar os dois transportes a essa sessão.
-4. Retirar RSA, PSS, timestamps e UUID por mensagem normal; ficam no estabelecimento. Não manter um modo antigo sem HMAC nem fallback em claro.
+1. Reutilizar geração/leitura de chaves, confiança por configuração local, OAEP, GCM e PSS.
+2. Manter a API curta de handshake e sessão para proteger/abrir bytes.
+3. Deixar sockets, enquadramento, timeout e multicast dentro de cada aplicação; não manter adaptadores TCP/UDP genéricos.
+4. Não cifrar mensagens normais com RSA; manter assinatura PSS por comunicação. Não adicionar timestamps/UUID de replay por mensagem, modo sem HMAC ou fallback em claro.
 5. Atualizar todos os testes, exemplo de uso e CLI/documentação afetados. O formato de rede será uma nova versão; rejeitar formatos antigos em vez de suportar dois protocolos por conveniência.
-6. Não apagar chaves privadas/manifestos existentes. A migração do protocolo não exige mudar silenciosamente os pares RSA ou seus fingerprints.
+6. Não apagar nem regenerar chaves privadas existentes. `trust.tsv`, se existir, deixa de ser usado; os pares RSA PEM permanecem no mesmo formato.
 
 ## 5. Mini-DNS — requisitos combinados
 
@@ -250,11 +245,11 @@ Contador de GETs em andamento, entrada em manutenção e autorização de novos 
 
 ## 10. Testes, evidências e falhas controladas
 
-- Manter JUnit e testes com sockets/JVMs existentes; adaptar os que assumem assinatura/chave nova em cada mensagem para o novo contrato de sessão. Não apagar testes de validação para fazer a suíte passar.
-- Segurança: duas chaves independentes; OAEP/PSS explícitos; confirmação com HMAC válido; contexto/par incorretos; assinatura de oferta falsa; HMAC adulterado e hash sem chave; rejeição antes de entregar bytes; nonce único em duas direções; sequência repetida/reordenada; oferta repetida sem zerar contadores; reinício com sessão descartada.
+- Manter poucos testes JUnit do handshake/sessão e os testes funcionais do Mini-DNS. Demonstrar os processos manualmente; não manter teste genérico que inicie JVMs separadas.
+- Segurança: duas chaves independentes; OAEP/PSS explícitos; confirmação válida; identidade não confiável; HMAC e assinatura adulterados; rejeição antes de entregar bytes; sequência crescente no envio. Replays não são rejeitados.
 - Transporte: TCP truncado/negativo/excessivo, EOF, timeout e várias mensagens; UDP acima do limite; tamanho real do handshake e multicast agregado; processo continua após pacote inválido.
 - Domínio: ao menos os cenários da matriz, incluindo evidência de **nenhuma chamada à origem** e **nenhum encaminhamento a P0** nos casos negativos respectivos.
-- Testes de TTL/validade usam relógio controlado; concorrência usa sinais/latches. Não depender de sleeps arbitrários ou de porta fixa nos testes.
+- Testes de domínio e sockets usam portas efêmeras quando aplicável. Não criar testes de replay, relógio ou quarentena.
 - Para a gravação, disponibilizar uma ação explícita de teste que altera o HMAC depois de produzir um pacote válido. Ela não pode desligar a validação no receptor, duplicar a implementação criptográfica ou virar modo inseguro de operação.
 - Comparar estado antes/depois da falha: tabela DNS, número de encaminhamentos, cache e calculadora. Registrar falhas sem despejar segredos ou stack traces repetitivos.
 - `./gradlew check` deve agregar os testes dos cinco módulos ao final. Não criar infraestrutura de benchmark, testes de nuvem ou camadas adicionais para isso.
@@ -264,9 +259,9 @@ Contador de GETs em andamento, entrada em manutenção e autorização de novos 
 ### Etapa A — Adequar segurança aos requisitos reais
 
 - Alterar `CryptoProfile`, `SecureEnvelope`, transportes e testes; acrescentar somente o objeto concreto de sessão necessário.
-- Reutilizar `KeyFiles`, `LocalIdentity`, `TrustStore`, `ReplayGuard`, tipos de resultado e CLI na medida em que atendem ao novo fluxo. Não conservar API sem chamadas apenas por compatibilidade hipotética.
+- Reutilizar `KeyFiles`, `LocalIdentity`, `TrustedIdentity` e o comando de geração de chaves. Remover manifesto, `ReplayGuard`, wrappers de transporte e tipos de resultado que só serviam a esses wrappers.
 - Atualizar `modules/security/README.md`: sessão, papel real de RSA/PSS/HMAC, chaves independentes, falhas, versão de protocolo e exemplo entre dois processos.
-- Saída: handshake e várias mensagens AES/HMAC em TCP e UDP entre duas JVMs, autenticidade de identidade preservada, falhas HMAC demonstráveis e sem RSA por mensagem normal.
+- Saída: API criptográfica reutilizável para handshake e frames AES/HMAC/PSS. Cada aplicação implementa seu próprio transporte e demonstra os processos exigidos; não cifrar payloads normais com RSA.
 
 ### Etapa B — Mini-DNS e descoberta
 
@@ -304,7 +299,7 @@ Prioridade sugerida: 17/10 segurança; 18/10 DNS/descoberta/P2P; 19/10 CDN e int
 
 Portas são escolhas locais, não números impostos pelo enunciado. Unicast usa `127.0.0.1`; multicast requer interface adequada e confinamento local na demonstração. Cada papel é processo independente, mas os quatro exercícios não precisam rodar simultaneamente.
 
-Vídeo: breve introdução às tecnologias; mostrar RSA no handshake e HMAC nas mensagens; demonstrar cada exercício e seus erros obrigatórios; abrir o código e explicar a organização. Ensaiar abaixo de oito minutos e iniciar os processos antes de gravar para não consumir o tempo com geração de chaves/quarentena.
+Vídeo: breve introdução às tecnologias; mostrar RSA no handshake e HMAC nas mensagens; demonstrar cada exercício e seus erros obrigatórios; abrir o código e explicar a organização. Ensaiar abaixo de oito minutos e iniciar os processos antes de gravar para não consumir o tempo com geração de chaves.
 
 Pacote no padrão `seu-nome-pratica-off1`, ajustado à identificação da dupla, com fontes, wrapper, documentos e instruções. Não incluir chaves privadas, caches de build ou configurações pessoais. Confirmar no SIGAA a forma de anexar/referenciar o vídeo. Preparar dependências antes se a apresentação precisar ocorrer sem internet; o título da prática não implica por si só build totalmente offline.
 
@@ -312,7 +307,7 @@ Pacote no padrão `seu-nome-pratica-off1`, ajustado à identificação da dupla,
 
 - HMAC não é hash sem chave e não substitui a vinculação de identidades no handshake. PSS foi preservado para essa vinculação, embora o algoritmo específico de assinatura não seja prescrito pelos PDFs.
 - O protocolo didático não é TLS/DTLS, não foi auditado formalmente, não é pós-quântico e não oferece forward secrecy com transporte RSA duradouro.
-- Replay na sessão e no handshake são controles distintos. Não declarar proteção a reinícios se remover quarentena/expiração sem substituir o mecanismo.
+- A implementação não detecta replay. Uma oferta antiga pode reinstalar chaves e reutilizar nonce GCM; explicar essa limitação e não declarar proteção contra replay ou segurança de produção.
 - Multicast agregado resolve o caso de três clientes, não gestão escalável de grupos. Não compartilhar chaves privadas ou uma chave AES/HMAC única entre todos os projetos.
 - Registro TCP não detecta todo travamento silencioso; perda de UDP não implica entrega garantida. Não acrescentar entrega exatamente uma vez, filas ou recuperação distribuída como requisitos que os PDFs não pediram.
 - Invalidação estrita depende de atualizações pelo procedimento de manutenção; não prometer consistência para edição externa dos arquivos ou alta disponibilidade sob partições.
