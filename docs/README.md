@@ -3,10 +3,12 @@
 Esta pasta é reservada aos artefatos de documentação do trabalho, como o enunciado,
 diagramas e material de apresentação. Código-fonte e arquivos gerados ficam fora dela.
 
-## Documentos
+## Guias por projeto
 
-- [Padrão de criptografia híbrida](padrao-criptografia-hibrida.md)
-- [Plano de correção e organização do módulo de segurança](plano-correcao-seguranca.md)
-- [Escopo mínimo de segurança](escopo-minimo-seguranca.md)
-- [Plano de simplificação da segurança](plano-simplificacao-seguranca.md)
-- [Plano integrado da prática](pratica-off1-plano-implementacao.md)
+- [Segurança compartilhada](security/README.md)
+- [Mini-DNS](mini-dns/README.md)
+- [Descoberta de serviços](service-discovery/README.md)
+- [Nomeação P2P](p2p-naming/README.md)
+- [CDN](cdn/README.md)
+
+O [plano integrado da prática](pratica-off1-plano-implementacao.md) permanece na raiz porque cobre todos os projetos.

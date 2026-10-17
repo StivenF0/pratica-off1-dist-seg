@@ -260,7 +260,7 @@ Contador de GETs em andamento, entrada em manutenção e autorização de novos 
 
 - Alterar `CryptoProfile`, `SecureEnvelope`, transportes e testes; acrescentar somente o objeto concreto de sessão necessário.
 - Reutilizar `KeyFiles`, `LocalIdentity`, `TrustedIdentity` e o comando de geração de chaves. Remover manifesto, `ReplayGuard`, wrappers de transporte e tipos de resultado que só serviam a esses wrappers.
-- Atualizar `modules/security/README.md`: sessão, papel real de RSA/PSS/HMAC, chaves independentes, falhas, versão de protocolo e exemplo entre dois processos.
+- Manter o guia de segurança em `docs/security/guia-de-uso.md` e o README do módulo como link para ele.
 - Saída: API criptográfica reutilizável para handshake e frames AES/HMAC/PSS. Cada aplicação implementa seu próprio transporte e demonstra os processos exigidos; não cifrar payloads normais com RSA.
 
 ### Etapa B — Mini-DNS e descoberta

@@ -71,10 +71,9 @@ Não apresentar o resultado como seguro contra replay ou como protocolo de produ
 - `modules/security/src/test/...`: reduzir os testes conforme a tabela; retirar os
   testes que só exercitam wrappers excluídos. Atualizar testes do Mini-DNS apenas para
   acompanhar a nova API, sem mudar agora a decisão pendente sobre o teste multicast.
-- Atualizar `modules/security/README.md`, `modules/mini-dns/README.md`,
-  `docs/padrao-criptografia-hibrida.md` e as partes de segurança de
-  `docs/pratica-off1-plano-implementacao.md` para não documentarem manifesto, wrappers
-  ou API removidos. Esses documentos só serão alterados durante a implementação.
+- Guias de uso ficam em `docs/security/guia-de-uso.md` e `docs/mini-dns/README.md`;
+  `modules/security/README.md` e `modules/mini-dns/README.md` apontam para eles. Os
+  documentos de segurança relacionados ficam juntos em `docs/security/`.
 
 ## Implementação e validação
 
