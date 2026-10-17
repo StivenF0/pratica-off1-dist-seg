@@ -70,7 +70,7 @@ server.send(request.session(), response);
 
 Um datagrama completo não pode exceder 1200 bytes. O endpoint detecta truncamento/excesso, rejeita frames maiores e descarta pacotes inválidos sem encerrar o listener. `receive()` pode bloquear conforme `DatagramSocket.setSoTimeout`. Sem fragmentação ou garantia de entrega UDP.
 
-Para as notificações Mini-DNS, `sendMulticast(group, sessions, payload)` empacota exatamente três frames AES/HMAC independentes, um por sessão, em um único datagrama de até 1200 bytes. O receptor deve criar um `MulticastSocket`, associá-lo ao grupo/interface e passá-lo ao endpoint; `receive()` reconhece o contêiner e valida o registro correspondente à sessão local. Não se compartilham chaves de grupo. O payload multicast máximo decorre do limite do pacote e do tamanho dos três registros.
+Para as notificações Mini-DNS, `sendMulticast(group, sessions, payload)` empacota exatamente três frames AES/HMAC independentes, um por sessão, em um único datagrama de até 1200 bytes. O servidor associa explicitamente o grupo e a interface multicast. Cada cliente mantém o socket unicast da sessão em uma porta efêmera e um segundo `SecureUdpEndpoint` sobre um `MulticastSocket` associado ao grupo; depois do handshake, chama `multicastEndpoint.attachSession(session, serverAddress)`. Assim, as três respostas unicast não disputam a porta multicast compartilhada, e os dois endpoints validam com a mesma sessão, contador e janela antirreplay. `receive()` no endpoint multicast valida somente o registro da sessão local. Não se compartilham chaves de grupo.
 
 ## Replay, falhas e logs
 

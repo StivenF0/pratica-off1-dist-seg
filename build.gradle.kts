@@ -9,5 +9,5 @@ allprojects {
 }
 
 tasks.named("check") {
-    dependsOn(":security:check")
+    dependsOn(":security:check", ":mini-dns:check")
 }

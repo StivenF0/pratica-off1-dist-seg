@@ -16,3 +16,5 @@
 Cada diretório em `modules/` corresponde a um subprojeto Gradle independente.
 
 O módulo `security` contém o provisionamento local de chaves, manifesto de confiança e adaptadores TCP/UDP. Consulte [`modules/security/README.md`](modules/security/README.md) para parâmetros, geração de identidades, API e testes. Os projetos de Sistemas Distribuídos permanecem independentes entre si e podem depender dessa biblioteca compartilhada.
+
+O Mini-DNS e seus comandos de execução estão documentados em [`modules/mini-dns/README.md`](modules/mini-dns/README.md).

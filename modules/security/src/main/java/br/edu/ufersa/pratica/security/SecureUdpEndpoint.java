@@ -122,6 +122,28 @@ public final class SecureUdpEndpoint implements AutoCloseable {
         }
     }
 
+    /** Attaches an already negotiated peer session to a second socket, e.g. a multicast listener. */
+    public void attachSession(SecureSession session, InetSocketAddress peerAddress)
+            throws SecurityProtocolException {
+        Objects.requireNonNull(session, "session");
+        Objects.requireNonNull(peerAddress, "peerAddress");
+        if (peerAddress.isUnresolved() || peerAddress.getPort() < 1
+                || !session.project().equals(localIdentity.project())
+                || !session.localIdentity().equals(localIdentity.name())
+                || session.remoteIdentity().equals(localIdentity.name())) {
+            throw new SecurityProtocolException("A sessão não pertence à identidade ou projeto deste endpoint.");
+        }
+        trustStore.requireIdentity(session.remoteIdentity());
+        Peer existing = sessions.get(session.sessionId());
+        if (existing != null) {
+            if (existing.session() == session && existing.remote().equals(peerAddress)) {
+                return;
+            }
+            throw new SecurityProtocolException("Sessão UDP já associada a outro par.");
+        }
+        register(new Peer(session, peerAddress, new byte[0], null));
+    }
+
     /** Sends a session-bound datagram to the peer address authenticated during setup. */
     public void send(SecureSession session, byte[] payload) throws IOException, GeneralSecurityException {
         Objects.requireNonNull(session, "session");
