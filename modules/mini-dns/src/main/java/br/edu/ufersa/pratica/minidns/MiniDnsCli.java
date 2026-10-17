@@ -140,14 +140,14 @@ public final class MiniDnsCli {
                                            String identity, Map<String, String> table) throws Exception {
         while (true) {
             MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(receive(socket, server, session));
-            if (reply.operation().equals("UPDATE")) {
-                showUpdate(identity, reply, table);
-            } else if (reply.operation().equals("ERROR")) {
-                System.out.println(reply.message());
-            } else if (reply.operation().equals("ANSWER")) {
-                table.put(reply.name(), reply.address());
-                System.out.printf("%s recebeu %s -> %s; HMAC validado.%n", identity, reply.name(), reply.address());
-                return;
+            switch (reply.operation()) {
+                case "UPDATE" -> showUpdate(identity, reply, table);
+                case "ERROR" -> System.out.println(reply.message());
+                case "ANSWER" -> {
+                    table.put(reply.name(), reply.address());
+                    System.out.printf("%s recebeu %s -> %s; HMAC validado.%n", identity, reply.name(), reply.address());
+                    return;
+                }
             }
         }
     }
