@@ -1,4 +1,4 @@
-package br.edu.ufersa.pratica.security;
+package br.edu.ufersa.pratica.security.identity;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -7,6 +7,7 @@ import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import br.edu.ufersa.pratica.security.CryptoProfile;
 
 /** The local identity and its separate RSA key pairs for OAEP and PSS. */
 public final class LocalIdentity {
@@ -69,16 +70,16 @@ public final class LocalIdentity {
         return transportPublicKey;
     }
 
-    PrivateKey transportPrivateKey() {
-        return transportPrivateKey;
+    public byte[] unwrapSessionKeys(byte[] wrapped) throws GeneralSecurityException {
+        return KeyFiles.unwrapSessionKeys(transportPrivateKey, wrapped);
     }
 
     public PublicKey signingPublicKey() {
         return signingPublicKey;
     }
 
-    PrivateKey signingPrivateKey() {
-        return signingPrivateKey;
+    public byte[] sign(byte[] value) throws GeneralSecurityException {
+        return KeyFiles.sign(signingPrivateKey, value);
     }
 
     private static Path requireRegularKeyFile(Path path, Path root) throws IOException {

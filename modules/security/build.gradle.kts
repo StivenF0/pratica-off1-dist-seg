@@ -11,7 +11,7 @@ java {
 }
 
 application {
-    mainClass.set("br.edu.ufersa.pratica.security.SecurityCli")
+    mainClass.set("br.edu.ufersa.pratica.security.cli.SecurityCli")
 }
 
 dependencies {

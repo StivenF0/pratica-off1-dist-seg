@@ -1,4 +1,4 @@
-package br.edu.ufersa.pratica.security;
+package br.edu.ufersa.pratica.security.identity;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +24,7 @@ import java.util.Set;
 import javax.crypto.Cipher;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
+import br.edu.ufersa.pratica.security.CryptoProfile;
 
 final class KeyFiles {
     static final String TRANSPORT_PRIVATE = "transport-private.pem";
@@ -112,6 +113,37 @@ final class KeyFiles {
         if (!java.security.MessageDigest.isEqual(challenge, decrypted)) {
             throw new GeneralSecurityException("As chaves RSA de transporte não formam um par.");
         }
+    }
+
+    static byte[] wrapSessionKeys(java.security.PublicKey recipient, byte[] keys)
+            throws GeneralSecurityException {
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, recipient, oaepParameters(), CryptoProfile.RANDOM);
+        return cipher.doFinal(keys);
+    }
+
+    static byte[] unwrapSessionKeys(java.security.PrivateKey recipient, byte[] wrapped)
+            throws GeneralSecurityException {
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+        cipher.init(Cipher.DECRYPT_MODE, recipient, oaepParameters());
+        return cipher.doFinal(wrapped);
+    }
+
+    static byte[] sign(java.security.PrivateKey key, byte[] value) throws GeneralSecurityException {
+        Signature signature = Signature.getInstance("RSASSA-PSS");
+        signature.setParameter(pssParameters());
+        signature.initSign(key, CryptoProfile.RANDOM);
+        signature.update(value);
+        return signature.sign();
+    }
+
+    static boolean verify(java.security.PublicKey key, byte[] value, byte[] signed)
+            throws GeneralSecurityException {
+        Signature signature = Signature.getInstance("RSASSA-PSS");
+        signature.setParameter(pssParameters());
+        signature.initVerify(key);
+        signature.update(value);
+        return signature.verify(signed);
     }
 
     static OAEPParameterSpec oaepParameters() {

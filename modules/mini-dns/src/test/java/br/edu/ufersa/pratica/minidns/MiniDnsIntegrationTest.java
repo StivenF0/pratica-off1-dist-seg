@@ -1,29 +1,29 @@
 package br.edu.ufersa.pratica.minidns;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
-import br.edu.ufersa.pratica.security.LocalIdentity;
-import br.edu.ufersa.pratica.security.OpenedMessage;
-import br.edu.ufersa.pratica.security.ReceivedDatagram;
-import br.edu.ufersa.pratica.security.ReplayGuard;
-import br.edu.ufersa.pratica.security.SecureSession;
-import br.edu.ufersa.pratica.security.SecureUdpEndpoint;
-import br.edu.ufersa.pratica.security.TrustStore;
+import br.edu.ufersa.pratica.security.CryptoProfile;
+import br.edu.ufersa.pratica.security.HmacValidationException;
+import br.edu.ufersa.pratica.security.SecurityProtocolException;
+import br.edu.ufersa.pratica.security.communication.SecureHandshake;
+import br.edu.ufersa.pratica.security.communication.SecureSession;
+import br.edu.ufersa.pratica.security.identity.LocalIdentity;
+import br.edu.ufersa.pratica.security.identity.TrustedIdentity;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
 import java.net.NetworkInterface;
 import java.net.SocketTimeoutException;
 import java.nio.file.Path;
-import java.time.Clock;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
@@ -39,70 +39,60 @@ class MiniDnsIntegrationTest {
     @TempDir
     static Path temporaryDirectory;
 
-    private static TrustStore trust;
+    private static Map<String, TrustedIdentity> trustedPeers;
     private static LocalIdentity dns;
     private static LocalIdentity registrarIdentity;
     private static List<LocalIdentity> clientIdentities;
 
     @BeforeAll
     static void createIdentities() throws Exception {
-        Path keysRoot = temporaryDirectory.resolve("keys");
-        for (String identity : IDENTITIES) {
-            LocalIdentity.generate(MiniDnsProtocol.PROJECT, identity, keysRoot.resolve(identity));
+        Path keys = temporaryDirectory.resolve("keys");
+        Map<String, TrustedIdentity> peers = new HashMap<>();
+        for (String name : IDENTITIES) {
+            Path directory = keys.resolve(name);
+            LocalIdentity.generate(MiniDnsProtocol.PROJECT, name, directory);
+            peers.put(name, TrustedIdentity.load(name, directory));
         }
-        Path manifest = keysRoot.resolve("trust.tsv");
-        TrustStore.writeManifest(MiniDnsProtocol.PROJECT, keysRoot, List.of(IDENTITIES), manifest);
-        trust = TrustStore.load(manifest, MiniDnsProtocol.PROJECT);
-        dns = LocalIdentity.load(MiniDnsProtocol.PROJECT, MiniDnsProtocol.DNS_SERVER,
-                keysRoot.resolve(MiniDnsProtocol.DNS_SERVER));
-        registrarIdentity = LocalIdentity.load(MiniDnsProtocol.PROJECT, MiniDnsProtocol.REGISTRAR,
-                keysRoot.resolve(MiniDnsProtocol.REGISTRAR));
-        clientIdentities = List.of(
-                LocalIdentity.load(MiniDnsProtocol.PROJECT, MiniDnsProtocol.CLIENTS.get(0),
-                        keysRoot.resolve(MiniDnsProtocol.CLIENTS.get(0))),
-                LocalIdentity.load(MiniDnsProtocol.PROJECT, MiniDnsProtocol.CLIENTS.get(1),
-                        keysRoot.resolve(MiniDnsProtocol.CLIENTS.get(1))),
-                LocalIdentity.load(MiniDnsProtocol.PROJECT, MiniDnsProtocol.CLIENTS.get(2),
-                        keysRoot.resolve(MiniDnsProtocol.CLIENTS.get(2))));
+        trustedPeers = Map.copyOf(peers);
+        dns = localIdentity(keys, MiniDnsProtocol.DNS_SERVER);
+        registrarIdentity = localIdentity(keys, MiniDnsProtocol.REGISTRAR);
+        clientIdentities = MiniDnsProtocol.CLIENTS.stream().map(name -> {
+            try {
+                return localIdentity(keys, name);
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        }).toList();
     }
 
     @Test
     void secureUnicastResolveInvalidNameAndCorruptHmacDoNotStopTheDnsServer() throws Exception {
         InetAddress loopback = InetAddress.getLoopbackAddress();
         try (DatagramSocket dnsSocket = new DatagramSocket(new InetSocketAddress(loopback, 0));
-             DatagramSocket clientSocket = new DatagramSocket(new InetSocketAddress(loopback, 0));
-             SecureUdpEndpoint dnsEndpoint = endpoint(dnsSocket, dns);
-             SecureUdpEndpoint clientEndpoint = endpoint(clientSocket, clientIdentities.get(0))) {
+             DatagramSocket clientSocket = new DatagramSocket(new InetSocketAddress(loopback, 0))) {
             dnsSocket.setSoTimeout(500);
             clientSocket.setSoTimeout(5_000);
-            MiniDnsServer server = new MiniDnsServer(dnsEndpoint,
-                    new InetSocketAddress(InetAddress.getByName("239.255.42.99"), 5301));
-            CompletableFuture<Void> serverRun = CompletableFuture.runAsync(() -> {
-                try {
-                    server.run();
-                } catch (Exception exception) {
-                    throw new RuntimeException(exception);
-                }
-            });
-            SecureSession session = clientEndpoint.connect(dnsEndpoint.localAddress(), MiniDnsProtocol.DNS_SERVER);
+            InetSocketAddress serverAddress = address(dnsSocket);
+            MiniDnsServer server = server(dnsSocket);
+            CompletableFuture<Void> serverRun = run(server);
+            try (SecureSession session = connect(clientSocket, clientIdentities.get(0),
+                    trusted(MiniDnsProtocol.DNS_SERVER), serverAddress)) {
+                send(clientSocket, serverAddress, session.seal(MiniDnsProtocol.resolve("servidor1")));
+                assertAnswer(receive(clientSocket, serverAddress, session), "ANSWER", "servidor1", "192.168.0.10");
 
-            clientEndpoint.send(session, MiniDnsProtocol.resolve("servidor1"));
-            assertAnswer(clientEndpoint.receive().message(), "ANSWER", "servidor1", "192.168.0.10");
+                byte[] corrupt = session.seal(MiniDnsProtocol.resolve("servidor1"));
+                corrupt[corrupt.length - CryptoProfile.SIGNATURE_BYTES - 1] ^= 1;
+                send(clientSocket, serverAddress, corrupt);
 
-            byte[] corrupt = session.seal(MiniDnsProtocol.resolve("servidor1"));
-            corrupt[corrupt.length - 1] ^= 1;
-            clientSocket.send(new DatagramPacket(corrupt, corrupt.length, dnsEndpoint.localAddress()));
-
-            clientEndpoint.send(session, MiniDnsProtocol.resolve("servidor99"));
-            MiniDnsProtocol.Reply invalid = MiniDnsProtocol.parseReply(clientEndpoint.receive().message().payload());
-            assertEquals("ERROR", invalid.operation());
-            assertEquals(MiniDnsProtocol.INVALID_INPUT, invalid.message());
-
-            clientEndpoint.send(session, MiniDnsProtocol.resolve("servidor1"));
-            assertAnswer(clientEndpoint.receive().message(), "ANSWER", "servidor1", "192.168.0.10");
-
-            server.close();
-            serverRun.get(2, TimeUnit.SECONDS);
+                send(clientSocket, serverAddress, session.seal(MiniDnsProtocol.resolve("servidor99")));
+                assertAnswer(receive(clientSocket, serverAddress, session),
+                        "ERROR", null, MiniDnsProtocol.INVALID_INPUT);
+                send(clientSocket, serverAddress, session.seal(MiniDnsProtocol.resolve("servidor1")));
+                assertAnswer(receive(clientSocket, serverAddress, session), "ANSWER", "servidor1", "192.168.0.10");
+            } finally {
+                server.close();
+                serverRun.get(2, TimeUnit.SECONDS);
+            }
         }
     }
 
@@ -123,32 +113,22 @@ class MiniDnsIntegrationTest {
         dnsSocket.setTimeToLive(1);
         dnsSocket.bind(new InetSocketAddress(0));
         dnsSocket.setSoTimeout(500);
-        SecureUdpEndpoint dnsEndpoint = endpoint(dnsSocket, dns);
-        MiniDnsServer server = new MiniDnsServer(dnsEndpoint, new InetSocketAddress(group, groupPort));
-        CompletableFuture<Void> serverRun = CompletableFuture.runAsync(() -> {
-            try {
-                server.run();
-            } catch (Exception exception) {
-                throw new RuntimeException(exception);
-            }
-        });
-
+        MiniDnsServer server = server(dnsSocket, group, groupPort);
+        CompletableFuture<Void> serverRun = run(server);
         ArrayList<Client> clients = new ArrayList<>();
-        SecureUdpEndpoint registrar = null;
+        DatagramSocket registrarSocket = null;
+        SecureSession registrarSession = null;
         InetSocketAddress serverAddress = new InetSocketAddress(loopback, dnsSocket.getLocalPort());
         try {
             for (int index = 0; index < clientIdentities.size(); index++) {
-                DatagramSocket unicastSocket = new DatagramSocket(new InetSocketAddress(loopback, 0));
-                unicastSocket.setSoTimeout(5_000);
-                SecureUdpEndpoint unicast = endpoint(unicastSocket, clientIdentities.get(index));
-                SecureUdpEndpoint multicast = endpoint(
-                        multicastClientSocket(network, group, groupPort),
-                        clientIdentities.get(index));
-                SecureSession session = unicast.connect(serverAddress, MiniDnsProtocol.DNS_SERVER);
-                multicast.attachSession(session, serverAddress);
-                unicast.send(session, MiniDnsProtocol.resolve("servidor1"));
-                assertAnswer(unicast.receive().message(), "ANSWER", "servidor1", "192.168.0.10");
-                clients.add(new Client(unicast, multicast, session));
+                DatagramSocket unicast = new DatagramSocket(new InetSocketAddress(loopback, 0));
+                unicast.setSoTimeout(5_000);
+                MulticastSocket multicast = multicastClientSocket(network, group, groupPort);
+                SecureSession session = connect(unicast, clientIdentities.get(index),
+                        trusted(MiniDnsProtocol.DNS_SERVER), serverAddress);
+                send(unicast, serverAddress, session.seal(MiniDnsProtocol.resolve("servidor1")));
+                assertAnswer(receive(unicast, serverAddress, session), "ANSWER", "servidor1", "192.168.0.10");
+                clients.add(new Client(unicast, multicast, session, serverAddress));
             }
 
             List<Update> updates = List.of(
@@ -156,29 +136,29 @@ class MiniDnsIntegrationTest {
                     new Update("servidor4", "192.168.0.144"),
                     new Update("servidor9", "192.168.0.199"));
             List<CompletableFuture<Boolean>> multicastChecks = clients.stream()
-                    .map(client -> asyncReceiveUpdates(client.multicast(), updates)).toList();
+                    .map(client -> asyncReceiveUpdates(client.multicast(), client.session(), updates)).toList();
 
-            DatagramSocket registrarSocket = new DatagramSocket(new InetSocketAddress(loopback, 0));
+            registrarSocket = new DatagramSocket(new InetSocketAddress(loopback, 0));
             registrarSocket.setSoTimeout(5_000);
-            registrar = endpoint(registrarSocket, registrarIdentity);
-            SecureSession registrarSession = registrar.connect(serverAddress, MiniDnsProtocol.DNS_SERVER);
-            byte[] corruptedUpdate = registrarSession.seal(
-                    MiniDnsProtocol.update("servidor1", "192.168.0.111"));
-            corruptedUpdate[corruptedUpdate.length - 1] ^= 1;
-            registrarSocket.send(new DatagramPacket(corruptedUpdate, corruptedUpdate.length, serverAddress));
-            assertResolution(clients.get(0).unicast(), clients.get(0).session(),
-                    "servidor1", "192.168.0.10");
+            registrarSession = connect(registrarSocket, registrarIdentity,
+                    trusted(MiniDnsProtocol.DNS_SERVER), serverAddress);
+            byte[] corrupted = registrarSession.seal(MiniDnsProtocol.update("servidor1", "192.168.0.111"));
+            corrupted[corrupted.length - CryptoProfile.SIGNATURE_BYTES - 1] ^= 1;
+            send(registrarSocket, serverAddress, corrupted);
+            assertResolution(clients.get(0), "servidor1", "192.168.0.10");
 
             for (Update update : updates) {
-                registrar.send(registrarSession, MiniDnsProtocol.update(update.name(), update.address()));
-                MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(registrar.receive().message().payload());
+                send(registrarSocket, serverAddress,
+                        registrarSession.seal(MiniDnsProtocol.update(update.name(), update.address())));
+                MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(receive(
+                        registrarSocket, serverAddress, registrarSession));
                 assertEquals("UPDATED", reply.operation());
                 assertEquals(update.address(), reply.address());
             }
 
-            assertResolution(clients.get(0).unicast(), clients.get(0).session(), "servidor1", "192.168.0.111");
-            assertResolution(clients.get(1).unicast(), clients.get(1).session(), "servidor4", "192.168.0.144");
-            assertResolution(clients.get(2).unicast(), clients.get(2).session(), "servidor9", "192.168.0.199");
+            assertResolution(clients.get(0), "servidor1", "192.168.0.111");
+            assertResolution(clients.get(1), "servidor4", "192.168.0.144");
+            assertResolution(clients.get(2), "servidor9", "192.168.0.199");
             boolean multicastDelivered = true;
             for (CompletableFuture<Boolean> check : multicastChecks) {
                 multicastDelivered &= check.get(6, TimeUnit.SECONDS);
@@ -186,43 +166,56 @@ class MiniDnsIntegrationTest {
             Assumptions.assumeTrue(multicastDelivered,
                     "A interface de rede não entrega multicast local neste ambiente.");
         } finally {
-            clients.forEach(client -> {
-                client.multicast().close();
-                client.unicast().close();
-            });
-            if (registrar != null) {
-                registrar.close();
+            clients.forEach(Client::close);
+            if (registrarSession != null) {
+                registrarSession.close();
+            }
+            if (registrarSocket != null) {
+                registrarSocket.close();
             }
             server.close();
             serverRun.get(2, TimeUnit.SECONDS);
         }
     }
 
-    private static CompletableFuture<Boolean> asyncReceiveUpdates(SecureUdpEndpoint endpoint, List<Update> expected) {
+    private static CompletableFuture<Boolean> asyncReceiveUpdates(MulticastSocket socket, SecureSession session,
+                                                                   List<Update> expected) {
         return CompletableFuture.supplyAsync(() -> {
-            for (Update update : expected) {
-                try {
-                    ReceivedDatagram datagram = endpoint.receive();
-                    OpenedMessage message = datagram.message();
-                    if (message.duplicate() || !message.sender().equals(MiniDnsProtocol.DNS_SERVER)) {
-                        return false;
+            try {
+                for (Update update : expected) {
+                    while (true) {
+                        byte[] payload = receiveMulticast(socket, session);
+                        MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(payload);
+                        if (!reply.operation().equals("UPDATE") || !reply.name().equals(update.name())
+                                || !reply.address().equals(update.address())) {
+                            return false;
+                        }
+                        break;
                     }
-                    MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(message.payload());
-                    if (!reply.operation().equals("UPDATE") || !reply.name().equals(update.name())
-                            || !reply.address().equals(update.address())) {
-                        return false;
-                    }
-                } catch (SocketTimeoutException timeout) {
-                    return false;
-                } catch (Exception exception) {
-                    throw new RuntimeException(exception);
                 }
+                return true;
+            } catch (SocketTimeoutException timeout) {
+                return false;
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
             }
-            return true;
         });
     }
 
-    private static DatagramSocket multicastClientSocket(NetworkInterface network, InetAddress group, int port)
+    private static byte[] receiveMulticast(MulticastSocket socket, SecureSession session) throws Exception {
+        while (true) {
+            DatagramPacket packet = receivePacket(socket);
+            try {
+                return session.open(bytes(packet));
+            } catch (HmacValidationException exception) {
+                throw exception;
+            } catch (SecurityProtocolException ignored) {
+                // Other clients receive the same group datagrams but cannot open this session's frame.
+            }
+        }
+    }
+
+    private static MulticastSocket multicastClientSocket(NetworkInterface network, InetAddress group, int port)
             throws Exception {
         MulticastSocket socket = new MulticastSocket(null);
         try {
@@ -238,28 +231,90 @@ class MiniDnsIntegrationTest {
         }
     }
 
-    private static void assertResolution(SecureUdpEndpoint endpoint, SecureSession session,
-                                         String name, String expected) throws Exception {
-        endpoint.send(session, MiniDnsProtocol.resolve(name));
-        assertAnswer(endpoint.receive().message(), "ANSWER", name, expected);
+    private static void assertResolution(Client client, String name, String expected) throws Exception {
+        send(client.unicast(), client.serverAddress(), client.session().seal(MiniDnsProtocol.resolve(name)));
+        assertAnswer(receive(client.unicast(), client.serverAddress(), client.session()), "ANSWER", name, expected);
     }
 
-    private static void assertAnswer(OpenedMessage message, String kind, String name, String address) {
-        assertFalse(message.duplicate());
-        assertEquals(MiniDnsProtocol.DNS_SERVER, message.sender());
-        MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(message.payload());
-        assertEquals(kind, reply.operation());
-        assertEquals(name, reply.name());
-        assertEquals(address, reply.address());
+    private static void assertAnswer(byte[] payload, String operation, String name, String address) {
+        MiniDnsProtocol.Reply reply = MiniDnsProtocol.parseReply(payload);
+        assertEquals(operation, reply.operation());
+        if (name != null) {
+            assertEquals(name, reply.name());
+        }
+        assertEquals(address, operation.equals("ERROR") ? reply.message() : reply.address());
     }
 
-    private static SecureUdpEndpoint endpoint(DatagramSocket socket, LocalIdentity identity) throws Exception {
-        return new SecureUdpEndpoint(socket, identity, trust, testReplayGuard());
+    private static SecureSession connect(DatagramSocket socket, LocalIdentity identity,
+                                         TrustedIdentity peer, InetSocketAddress server) throws Exception {
+        SecureHandshake.Pending pending = SecureHandshake.create(identity, peer);
+        send(socket, server, pending.encodedOffer());
+        try {
+            while (true) {
+                DatagramPacket packet = receivePacket(socket);
+                if (packet.getSocketAddress().equals(server)
+                        && SecureHandshake.confirm(pending, bytes(packet))) {
+                    return pending.session();
+                }
+            }
+        } catch (Exception exception) {
+            pending.session().close();
+            throw exception;
+        }
     }
 
-    private static ReplayGuard testReplayGuard() {
-        return new ReplayGuard(Clock.systemUTC(), System::nanoTime, Duration.ofSeconds(30),
-                Duration.ofSeconds(2), Duration.ZERO, 100);
+    private static byte[] receive(DatagramSocket socket, InetSocketAddress server, SecureSession session)
+            throws Exception {
+        while (true) {
+            DatagramPacket packet = receivePacket(socket);
+            if (packet.getSocketAddress().equals(server)) {
+                return session.open(bytes(packet));
+            }
+        }
+    }
+
+    private static DatagramPacket receivePacket(DatagramSocket socket) throws Exception {
+        byte[] buffer = new byte[CryptoProfile.MAX_UDP_DATAGRAM_BYTES + 1];
+        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+        socket.receive(packet);
+        if (packet.getLength() > CryptoProfile.MAX_UDP_DATAGRAM_BYTES) {
+            throw new java.io.IOException("Datagrama acima do limite.");
+        }
+        return packet;
+    }
+
+    private static byte[] bytes(DatagramPacket packet) {
+        byte[] bytes = new byte[packet.getLength()];
+        System.arraycopy(packet.getData(), packet.getOffset(), bytes, 0, packet.getLength());
+        return bytes;
+    }
+
+    private static void send(DatagramSocket socket, InetSocketAddress address, byte[] bytes) throws Exception {
+        socket.send(new DatagramPacket(bytes, bytes.length, address));
+    }
+
+    private static LocalIdentity localIdentity(Path keys, String name) throws Exception {
+        return LocalIdentity.load(MiniDnsProtocol.PROJECT, name, keys.resolve(name));
+    }
+
+    private static TrustedIdentity trusted(String name) {
+        return trustedPeers.get(name);
+    }
+
+    private static MiniDnsServer server(DatagramSocket socket) {
+        return server(socket, InetAddress.getLoopbackAddress(), 5301);
+    }
+
+    private static MiniDnsServer server(DatagramSocket socket, InetAddress group, int port) {
+        return new MiniDnsServer(socket, dns, trustedPeers, new InetSocketAddress(group, port));
+    }
+
+    private static CompletableFuture<Void> run(MiniDnsServer server) {
+        return CompletableFuture.runAsync(server::run);
+    }
+
+    private static InetSocketAddress address(DatagramSocket socket) {
+        return new InetSocketAddress(socket.getLocalAddress(), socket.getLocalPort());
     }
 
     private static NetworkInterface multicastInterface() throws Exception {
@@ -268,7 +323,7 @@ class MiniDnsIntegrationTest {
             NetworkInterface candidate = interfaces.nextElement();
             if (candidate.isUp() && candidate.supportsMulticast()
                     && Collections.list(candidate.getInetAddresses()).stream()
-                    .anyMatch(address -> address instanceof java.net.Inet4Address && !address.isLoopbackAddress())) {
+                    .anyMatch(address -> address instanceof Inet4Address && !address.isLoopbackAddress())) {
                 return candidate;
             }
         }
@@ -278,6 +333,13 @@ class MiniDnsIntegrationTest {
     private record Update(String name, String address) {
     }
 
-    private record Client(SecureUdpEndpoint unicast, SecureUdpEndpoint multicast, SecureSession session) {
+    private record Client(DatagramSocket unicast, MulticastSocket multicast, SecureSession session,
+                          InetSocketAddress serverAddress) implements AutoCloseable {
+        @Override
+        public void close() {
+            session.close();
+            unicast.close();
+            multicast.close();
+        }
     }
 }

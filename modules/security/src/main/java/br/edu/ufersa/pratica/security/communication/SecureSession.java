@@ -1,4 +1,4 @@
-package br.edu.ufersa.pratica.security;
+package br.edu.ufersa.pratica.security.communication;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -17,11 +17,16 @@ import javax.crypto.Cipher;
 import javax.crypto.Mac;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import br.edu.ufersa.pratica.security.CryptoProfile;
+import br.edu.ufersa.pratica.security.HmacValidationException;
+import br.edu.ufersa.pratica.security.SecurityProtocolException;
+import br.edu.ufersa.pratica.security.identity.LocalIdentity;
+import br.edu.ufersa.pratica.security.identity.TrustedIdentity;
 
-/** AES-256-GCM and HMAC-SHA-256 message protection for one authenticated peer session. */
+/** AES-256-GCM, HMAC-SHA-256, and RSA-PSS protection for one peer session. */
 public final class SecureSession implements AutoCloseable {
-    static final int MAGIC = 0x53455332; // SES2
-    static final int VERSION = 2;
+    static final int MAGIC = 0x53455333; // SES3
+    static final int VERSION = 3;
     static final int APPLICATION = 0;
     static final int READY = 1;
     static final int INITIATOR_TO_RESPONDER = 0;
@@ -33,16 +38,19 @@ public final class SecureSession implements AutoCloseable {
     private final UUID sessionId;
     private final byte[] aesKey;
     private final byte[] hmacKey;
+    private final LocalIdentity signer;
+    private final TrustedIdentity verifier;
     private final boolean initiator;
-    private final ReceiveWindow receiveWindow = new ReceiveWindow();
     private long nextSendSequence;
     private boolean closed;
 
-    SecureSession(String project, String localIdentity, String remoteIdentity, UUID sessionId,
+    SecureSession(LocalIdentity localIdentity, TrustedIdentity remoteIdentity, UUID sessionId,
                   byte[] aesKey, byte[] hmacKey, boolean initiator) {
-        this.project = Objects.requireNonNull(project, "project");
-        this.localIdentity = Objects.requireNonNull(localIdentity, "localIdentity");
-        this.remoteIdentity = Objects.requireNonNull(remoteIdentity, "remoteIdentity");
+        LocalIdentity local = Objects.requireNonNull(localIdentity, "localIdentity");
+        TrustedIdentity remote = Objects.requireNonNull(remoteIdentity, "remoteIdentity");
+        this.project = local.project();
+        this.localIdentity = local.name();
+        this.remoteIdentity = remote.name();
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         if (aesKey == null || aesKey.length != CryptoProfile.AES_KEY_BYTES
                 || hmacKey == null || hmacKey.length != CryptoProfile.HMAC_KEY_BYTES
@@ -51,6 +59,8 @@ public final class SecureSession implements AutoCloseable {
         }
         this.aesKey = aesKey.clone();
         this.hmacKey = hmacKey.clone();
+        this.signer = local;
+        this.verifier = remote;
         this.initiator = initiator;
     }
 
@@ -76,8 +86,8 @@ public final class SecureSession implements AutoCloseable {
         return seal(APPLICATION, payload);
     }
 
-    /** Opens an application frame after its HMAC, GCM tag, direction, and replay window pass. */
-    public synchronized OpenedMessage open(byte[] encoded) throws GeneralSecurityException {
+    /** Opens a frame after validating HMAC, signature, GCM tag, and direction. */
+    public synchronized byte[] open(byte[] encoded) throws GeneralSecurityException {
         ParsedFrame frame;
         try {
             frame = parse(encoded);
@@ -87,7 +97,7 @@ public final class SecureSession implements AutoCloseable {
         if (frame.type() != APPLICATION) {
             throw new SecurityProtocolException("O frame não contém uma mensagem de aplicação.");
         }
-        return open(frame, encoded, APPLICATION, false);
+        return open(frame, encoded, APPLICATION);
     }
 
     synchronized byte[] sealReady() throws GeneralSecurityException {
@@ -104,40 +114,11 @@ public final class SecureSession implements AutoCloseable {
         if (frame.type() != READY || frame.sequence() != 0) {
             throw new SecurityProtocolException("Confirmação de sessão inválida.");
         }
-        OpenedMessage ready = open(frame, encoded, READY, true);
-        if (ready.duplicate()) {
-            return false;
-        }
-        if (!Arrays.equals(ready.payload(), readyPayload())) {
+        byte[] ready = open(frame, encoded, READY);
+        if (!Arrays.equals(ready, readyPayload())) {
             throw new SecurityProtocolException("Confirmação de sessão inválida.");
         }
-        return !ready.duplicate();
-    }
-
-    synchronized boolean isInitiator() {
-        return initiator;
-    }
-
-    synchronized boolean matchesReady(byte[] encoded) {
-        try {
-            ParsedFrame frame = parse(encoded);
-            return frame.type() == READY && frame.sessionId().equals(sessionId);
-        } catch (IOException | IllegalArgumentException exception) {
-            return false;
-        }
-    }
-
-    static boolean isSessionFrame(byte[] encoded) {
-        return encoded != null && encoded.length >= 4 && ByteBuffer.wrap(encoded).getInt() == MAGIC;
-    }
-
-    static UUID sessionIdFromFrame(byte[] encoded) throws IOException {
-        ParsedFrame frame = parse(encoded);
-        return frame.sessionId();
-    }
-
-    static int frameType(byte[] encoded) throws IOException {
-        return parse(encoded).type();
+        return true;
     }
 
     @Override
@@ -151,8 +132,8 @@ public final class SecureSession implements AutoCloseable {
 
     private byte[] seal(int type, byte[] payload) throws GeneralSecurityException {
         ensureOpen();
-        if (payload.length > CryptoProfile.MAX_TCP_SESSION_PAYLOAD_BYTES) {
-            throw new SecurityProtocolException("Payload excede o limite permitido para TCP.");
+        if (payload.length > CryptoProfile.MAX_SESSION_PAYLOAD_BYTES) {
+            throw new SecurityProtocolException("Payload excede o limite permitido para um frame.");
         }
         if (nextSendSequence == Long.MAX_VALUE) {
             throw new SecurityProtocolException("A sequência da sessão esgotou; negocie uma sessão nova.");
@@ -172,9 +153,10 @@ public final class SecureSession implements AutoCloseable {
 
             byte[] authenticated = concat(header, ciphertext);
             byte[] mac = hmac(authenticated);
-            byte[] frame = concat(authenticated, mac);
-            if (frame.length > CryptoProfile.MAX_TCP_ENVELOPE_BYTES) {
-                throw new SecurityProtocolException("Frame excede o limite TCP.");
+            byte[] unsigned = concat(authenticated, mac);
+            byte[] frame = concat(unsigned, signer.sign(unsigned));
+            if (frame.length > CryptoProfile.MAX_FRAME_BYTES) {
+                throw new SecurityProtocolException("Frame excede o limite permitido.");
             }
             return frame;
         } finally {
@@ -182,8 +164,7 @@ public final class SecureSession implements AutoCloseable {
         }
     }
 
-    private OpenedMessage open(ParsedFrame frame, byte[] encoded, int expectedType, boolean allowDuplicate)
-            throws GeneralSecurityException {
+    private byte[] open(ParsedFrame frame, byte[] encoded, int expectedType) throws GeneralSecurityException {
         ensureOpen();
         int expectedDirection = initiator ? RESPONDER_TO_INITIATOR : INITIATOR_TO_RESPONDER;
         if (frame.type() != expectedType || !frame.sessionId().equals(sessionId)
@@ -192,9 +173,21 @@ public final class SecureSession implements AutoCloseable {
         }
 
         byte[] actualMac = hmac(Arrays.copyOf(encoded, frame.macOffset()));
-        byte[] suppliedMac = Arrays.copyOfRange(encoded, frame.macOffset(), encoded.length);
+        byte[] suppliedMac = Arrays.copyOfRange(encoded, frame.macOffset(), frame.signatureOffset());
         if (!MessageDigest.isEqual(actualMac, suppliedMac)) {
             throw new HmacValidationException();
+        }
+
+        byte[] unsigned = Arrays.copyOf(encoded, frame.signatureOffset());
+        byte[] signature = Arrays.copyOfRange(encoded, frame.signatureOffset(), encoded.length);
+        boolean validSignature;
+        try {
+            validSignature = verifier.verify(unsigned, signature);
+        } catch (GeneralSecurityException exception) {
+            throw new SecurityProtocolException("Assinatura digital inválida.", exception);
+        }
+        if (!validSignature) {
+            throw new SecurityProtocolException("Assinatura digital inválida.");
         }
 
         byte[] ciphertext = Arrays.copyOfRange(encoded, frame.ciphertextOffset(), frame.macOffset());
@@ -209,16 +202,9 @@ public final class SecureSession implements AutoCloseable {
             throw new SecurityProtocolException("Mensagem inválida ou não autenticada.", exception);
         }
 
-        boolean fresh = receiveWindow.claim(frame.sequence());
-        if (!fresh && !allowDuplicate) {
-            Arrays.fill(plaintext, (byte) 0);
-            return new OpenedMessage(project, remoteIdentity, localIdentity, sessionId,
-                    frame.sequence(), new byte[0], true);
-        }
-        OpenedMessage message = new OpenedMessage(project, remoteIdentity, localIdentity, sessionId,
-                frame.sequence(), fresh ? plaintext : new byte[0], !fresh);
+        byte[] payload = plaintext.clone();
         Arrays.fill(plaintext, (byte) 0);
-        return message;
+        return payload;
     }
 
     private byte[] hmac(byte[] bytes) throws GeneralSecurityException {
@@ -256,8 +242,8 @@ public final class SecureSession implements AutoCloseable {
 
     private static ParsedFrame parse(byte[] encoded) throws IOException {
         if (encoded == null || encoded.length < CryptoProfile.SESSION_HEADER_BYTES
-                + CryptoProfile.GCM_TAG_BYTES + CryptoProfile.HMAC_BYTES
-                || encoded.length > CryptoProfile.MAX_TCP_ENVELOPE_BYTES) {
+                + CryptoProfile.GCM_TAG_BYTES + CryptoProfile.HMAC_BYTES + CryptoProfile.SIGNATURE_BYTES
+                || encoded.length > CryptoProfile.MAX_FRAME_BYTES) {
             throw new IOException("Tamanho inválido do frame de sessão.");
         }
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(encoded));
@@ -271,14 +257,16 @@ public final class SecureSession implements AutoCloseable {
         long sequence = in.readLong();
         int ciphertextLength = in.readInt();
         int headerLength = encoded.length - in.available();
-        long expected = (long) headerLength + ciphertextLength + CryptoProfile.HMAC_BYTES;
+        long expected = (long) headerLength + ciphertextLength + CryptoProfile.HMAC_BYTES
+                + CryptoProfile.SIGNATURE_BYTES;
         if (type != APPLICATION && type != READY || direction != INITIATOR_TO_RESPONDER
                 && direction != RESPONDER_TO_INITIATOR || sequence < 0
                 || ciphertextLength < CryptoProfile.GCM_TAG_BYTES || expected != encoded.length) {
             throw new IOException("Campos ou comprimentos inválidos no frame de sessão.");
         }
+        int signatureOffset = encoded.length - CryptoProfile.SIGNATURE_BYTES;
         return new ParsedFrame(type, new UUID(most, least), direction, sequence, headerLength,
-                headerLength + ciphertextLength);
+                headerLength + ciphertextLength, signatureOffset);
     }
 
     private static byte[] iv(int direction, long sequence) {
@@ -298,38 +286,10 @@ public final class SecureSession implements AutoCloseable {
     }
 
     private record ParsedFrame(int type, UUID sessionId, int direction, long sequence,
-                               int headerLength, int macOffset) {
+                               int headerLength, int macOffset, int signatureOffset) {
         int ciphertextOffset() {
             return headerLength;
         }
     }
 
-    private static final class ReceiveWindow {
-        private long highest = -1;
-        private long seen;
-
-        boolean claim(long sequence) {
-            if (highest < 0) {
-                highest = sequence;
-                seen = 1;
-                return true;
-            }
-            if (sequence > highest) {
-                long shift = sequence - highest;
-                seen = shift >= Long.SIZE ? 1 : (seen << (int) shift) | 1;
-                highest = sequence;
-                return true;
-            }
-            long behind = highest - sequence;
-            if (behind >= Long.SIZE) {
-                return false;
-            }
-            long bit = 1L << (int) behind;
-            if ((seen & bit) != 0) {
-                return false;
-            }
-            seen |= bit;
-            return true;
-        }
-    }
 }
