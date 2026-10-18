@@ -4,3 +4,8 @@
 .gradle
 build
 .kotlin
+
+# Local RSA keys and generated trust bundles
+security-keys/
+**/transport-private.pem
+**/signing-private.pem
